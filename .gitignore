@@ -22,3 +22,8 @@ vendor
 
 # Snap build
 *.snap
+clouds.yaml
+export-logs.log
+logs
+.gitignore
+logs2
