@@ -3,8 +3,10 @@ package exporters
 import (
 	"crypto/tls"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -137,7 +139,18 @@ func (exporter *BaseOpenStackExporter) Collect(ch chan<- prometheus.Metric) {
 		}
 
 		if err := exporter.RunCollection(metric, name, ch, exporter.logger); err != nil {
-			exporter.logger.Error("Failed to collect metric for exporter", "exporter", exporter.Name, "error", err)
+			// Check if this is a timeout error
+			if strings.Contains(err.Error(), "timeout") || strings.Contains(err.Error(), "deadline exceeded") {
+				exporter.logger.Error("Service timed out during metric collection", 
+					"service", exporter.Name, 
+					"metric", name, 
+					"error", err)
+			} else {
+				exporter.logger.Error("Failed to collect metric for exporter", 
+					"exporter", exporter.Name, 
+					"metric", name, 
+					"error", err)
+			}
 			metricsDown++
 		}
 	}
@@ -275,8 +288,34 @@ func NewExporter(name, prefix, cloud string, disabledMetrics []string, endpointT
 		tlsConfig.Certificates = []tls.Certificate{cert}
 		configureTransport = true
 	}
+	
+	func parseTimeout(key string, def time.Duration) time.Duration {
+		v, ok := os.LookupEnv(key)
+		if !ok || v == "" {
+			return def
+		}
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
+		if n, err := strconv.Atoi(v); err == nil {
+			return time.Duration(n) * time.Second
+		}
+		log.Printf("invalid %s=%q, using default %v", key, v, def)
+		return def
+	}
+
+	hdrTO := parseTimeout("TIMEOUT", 15*time.Second)
+	transport = &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second, 
+		}).DialContext,
+		ResponseHeaderTimeout: hdrTO * time.Second, 
+		IdleConnTimeout:       90 * time.Second, 
+	}
+	
 	if configureTransport {
-		transport = &http.Transport{TLSClientConfig: &tlsConfig}
+		transport.TLSClientConfig = &tlsConfig
 	}
 
 	client, err := NewServiceClient(name, &opts, transport, endpointType)
